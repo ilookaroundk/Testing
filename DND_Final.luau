@@ -41,7 +41,7 @@ local CONFIG = {
     DIALOGUE_READ_TIME = 3,
 }
 
-local gmUserId = LocalPlayer.UserId -- the script runner is the GM
+local gmUserId = LocalPlayer.2570901688 -- the script runner is the GM
 local party = {} -- map userId -> character table
 local partyOrder = {} -- insertion order (used for display)
 local currentNodeId = nil
