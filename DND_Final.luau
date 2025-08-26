@@ -782,51 +782,6 @@ function story:Present()
     UpdateStatBox()
 end
 
--- Hook up the chat listeners (UPDATED)
-if TextChatService then
-    TextChatService.MessageReceived:Connect(function(msg)
-        local name = msg.TextSource.Name
-        if name == "ilookaroundkALT" then return end -- Ignore this player
-        if not awaitingChoice then
-            if tostring(msg.Text or ""):lower():match("^vote%s+") then
-                ProcessChatCommand(msg.Text, name)
-                return
-            end
-        else
-            AcceptChoiceFromChat(msg.Text, name)
-        end
-    end)
-else
-    -- Legacy support for older chat systems
-    for _, p in ipairs(Players:GetPlayers()) do
-        p.Chatted:Connect(function(msg)
-            local name = p.Name
-            if name == "ilookaroundkALT" then return end -- Ignore this player
-            if not awaitingChoice then
-                if tostring(msg):lower():match("^vote%s+") then
-                    ProcessChatCommand(msg, name)
-                    return
-                end
-            else
-                AcceptChoiceFromChat(msg, name)
-            end
-        end)
-    end
-    Players.PlayerAdded:Connect(function(p)
-        p.Chatted:Connect(function(msg)
-            local name = p.Name
-            if name == "ilookaroundkALT" then return end -- Ignore this player
-            if not awaitingChoice then
-                if tostring(msg):lower():match("^vote%s+") then
-                    ProcessChatCommand(msg, name)
-                    return
-                end
-            else
-                AcceptChoiceFromChat(msg, name)
-            end
-        end)
-    end)
-end
 
 -- ===== Scene Library (Part 2) =====
 local hubScene = story.New(
