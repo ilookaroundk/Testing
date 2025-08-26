@@ -2,15 +2,15 @@
 -- Run this as the single GM (Dungeon Master). The script listens to all players' chat to collect votes and controls the entire adventure.
 -- Players do NOT need this script. They vote via chat (e.g. "!vote A" or "A") and use !join to join the party.
 -- Author: Generated for ilookaroundk (2025-08-26)
+-- Save/load/persistence features removed per request.
 
 -- Features:
 --  - Extensive branching adventure map (many choices: Castle, Road, Forest, Cave, Ruins, Village, Swamp, Tower, Mines, Harbor, etc.)
 --  - Voting system: party members vote by chat or GM GUI; votes decide each choice for the party.
---  - Consequences: good choices give loot, XP, keys, gold, map fragments; bad choices cause traps, damage, loss of items, or encounters.
+--  - Consequences: good choices give loot, XP, keys, gold, map fragments; bad choices cause traps, damage, loss of items, or other events.
 --  - Inventory, gold, XP, levels, HP for each party member (generated when they join).
---  - GUI for GM: view party, current node, live vote counts, start/force decisions, spawn random events, view logs, save/load.
---  - Save to file support when writefile/readfile exist.
---  - Chat commands: !join, !leave, !start, !end, !vote <A|1>, !action <text>, !status, !roll <notation>, !save, !load
+--  - GUI for GM: view party, current node, live vote counts, start/force decisions, spawn random events, view logs.
+--  - Chat commands: !join, !leave, !start, !end, !vote <A|1>, !action <text>, !status, !roll <notation>
 --  - All choice resolution is controlled by votes collected from party members via chat.
 
 -- NOTE: This is a LocalScript intended to be run by the GM only.
@@ -34,14 +34,12 @@ local CONFIG = {
     STARTING_GOLD = 10,
     BASE_HP = 12,
     BASE_XP_PER_GOOD = 30,
-    SAVE_FILE = "dd_adventure_save.json",
-    ALLOW_SAVE = (type(writefile) == "function" and type(readfile) == "function"),
     RAILSAFE = true,
     MAX_OPTION_LABELS = 12,
     DIALOGUE_READ_TIME = 3,
 }
 
-local gmUserId = LocalPlayer.2570901688 -- the script runner is the GM
+local gmUserId = LocalPlayer.UserId -- the script runner is the GM
 local party = {} -- map userId -> character table
 local partyOrder = {} -- insertion order (used for display)
 local currentNodeId = nil
@@ -92,58 +90,6 @@ local function rollDice(notation)
 end
 
 local function d20() return rollDice("d20") end
-
--- ----------------------------
--- Persistence
--- ----------------------------
-local function canSave()
-    return CONFIG.ALLOW_SAVE
-end
-
-local function saveGame()
-    if not canSave() then
-        notify("Save failed", "Save functions are unavailable in this environment.")
-        return false
-    end
-    local data = {
-        party = party,
-        partyOrder = partyOrder,
-        currentNodeId = currentNodeId,
-        adventureRunning = adventureRunning,
-        messageLog = messageLog
-    }
-    local ok, encoded = pcall(function() return game:GetService("HttpService"):JSONEncode(data) end)
-    if not ok then
-        notify("Save failed", "Encoding error.")
-        return false
-    end
-    pcall(function() writefile(CONFIG.SAVE_FILE, encoded) end)
-    notify("Saved", "Adventure saved to "..CONFIG.SAVE_FILE)
-    return true
-end
-
-local function loadGame()
-    if not canSave() then
-        notify("Load failed", "Load functions are unavailable in this environment.")
-        return false
-    end
-    if not isfile(CONFIG.SAVE_FILE) then
-        notify("Load failed", "No save file found.")
-        return false
-    end
-    local ok, content = pcall(function() return readfile(CONFIG.SAVE_FILE) end)
-    if not ok then notify("Load failed", "Readfile error"); return false end
-    local ok2, decoded = pcall(function() return game:GetService("HttpService"):JSONDecode(content) end)
-    if not ok2 then notify("Load failed", "Decode error"); return false end
-    party = decoded.party or {}
-    partyOrder = decoded.partyOrder or {}
-    currentNodeId = decoded.currentNodeId
-    adventureRunning = decoded.adventureRunning or false
-    messageLog = decoded.messageLog or {}
-    notify("Loaded", "Save loaded. Use GUI to resume.")
-    updateAllUI()
-    return true
-end
 
 -- ----------------------------
 -- Party management
@@ -227,18 +173,6 @@ end
 -- ----------------------------
 -- Items / Loot templates
 -- ----------------------------
-local LootTemplates = {
-    {Key="gold_small", Name="Small Pouch of Gold", Type="gold", Amount=rand and rand(5,20) or nil}, -- Amount set dynamically
-    {Key="potion_heal", Name="Healing Potion", Type="consumable", Heal="1d8+2"},
-    {Key="gem_ruby", Name="Ruby Gem", Type="treasure", Value=100},
-    {Key="map_frag", Name="Map Fragment", Type="map", Fragments=1},
-    {Key="mystic_key", Name="Mysterious Key", Type="key"},
-    {Key="torch", Name="Torch", Type="utility"},
-    {Key="old_scroll", Name="Old Scroll", Type="lore"},
-    {Key="rope", Name="Rope (50ft)", Type="utility"},
-    {Key="silver_ring", Name="Silver Ring", Type="treasure", Value=25},
-}
-
 local function randomLootForGoodChoice()
     local roll = math.random(1,100)
     if roll <= 40 then
@@ -257,33 +191,17 @@ end
 -- ----------------------------
 -- Adventure nodes
 -- ----------------------------
--- Node structure:
--- nodes[nodeId] = {
---   id = nodeId,
---   title = "Title",
---   desc = "Long description shown to party",
---   options = { {label="Go to Castle", next="castle_gate", goodChance=80, goodConsequence=function(context) ... end, badConsequence=function(context) ... end, note="flavor"} , ... },
---   onEnter = function(context) end, -- optional
---   autoResolve = false, -- if true, no vote, resolve automatically
--- }
--- Consequence functions receive context = {chosenOptionIndex, voters = {uid=choice,...}}
--- For simplicity, we'll implement consequence objects rather than functions for many nodes.
-
-nodes = {}
-
--- Utility helper to create option
 local function Option(label, nextNode, goodEffect, badEffect, chanceGood, note)
     return {
         label = label,
         next = nextNode,
-        chanceGood = chanceGood or 75, -- percentage chance that choice is a "good" route (lower -> more risk)
+        chanceGood = chanceGood or 75,
         good = goodEffect,
         bad = badEffect,
         note = note
     }
 end
 
--- Consequence helpers: return functions that apply effects to party members or single random member
 local function rewardAll_gold(amount)
     return function(context)
         for _, uid in ipairs(partyOrder) do
@@ -333,8 +251,8 @@ local function loseItemRandom()
     end
 end
 
--- Build the node graph (many choices)
--- Start node
+nodes = {}
+
 nodes["crossroads"] = {
     id = "crossroads",
     title = "Crossroads",
@@ -443,8 +361,6 @@ nodes["great_hall"] = {
     }
 }
 
--- add many more nodes to enrich adventure
-
 nodes["service_tunnel"] = {
     id = "service_tunnel",
     title = "Service Tunnel",
@@ -530,7 +446,6 @@ nodes["fix_cart"] = {
     }
 }
 
--- A few more nodes for variety
 nodes["ambush_point"] = {
     id = "ambush_point",
     title = "Ambush Point",
@@ -602,13 +517,12 @@ nodes["notice_board"] = {
     }
 }
 
--- Add extra end or special nodes
 nodes["hermit_reward"] = {
     id = "hermit_reward",
     title = "Hermit's Reward",
     desc = "The hermit smiles and offers a small boon: a potion or a secret direction.",
     options = {
-        Option("Take the potion", "cottage_end", function() for _,id in ipairs(partyOrder) do addItem(id, {Key="potion_heal", Name="Healing Potion", Type="consumable", Heal="1d8+2"}) end, loseItemRandom(), 95, "A small boon"),
+        Option("Take the potion", "cottage_end", function() for _,id in ipairs(partyOrder) do addItem(id, {Key="potion_heal", Name="Healing Potion", Type="consumable", Heal="1d8+2"}) end end, loseItemRandom(), 95, "A small boon"),
         Option("Ask for a secret direction", "secret_path", rewardAll_xp(40), damageRandom(1,"misguided hint"), 85, "Knowledge is valuable"),
     }
 }
@@ -633,7 +547,6 @@ nodes["mystery_box"] = {
     }
 }
 
--- Final nodes and many branching terminals
 nodes["secret_path"] = {
     id = "secret_path",
     title = "Secret Path",
@@ -662,7 +575,6 @@ nodes["forest_exit"] = {
     }
 }
 
--- Add more nodes to cover other earlier next targets...
 nodes["dungeon_entrance"] = {
     id = "dungeon_entrance",
     title = "Dungeon Entrance",
@@ -684,7 +596,6 @@ nodes["dark_hall"] = {
     }
 }
 
--- A node for when choices close adventure or loop
 nodes["map_room"] = {
     id = "map_room",
     title = "Map Room",
@@ -705,7 +616,6 @@ nodes["lighthouse"] = {
     }
 }
 
--- A small set of terminal nodes (endings)
 nodes["beacon_solved"] = {
     id = "beacon_solved",
     title = "Beacon Restored",
@@ -727,7 +637,7 @@ nodes["celebration"] = {
 nodes["end_victory"] = {
     id = "end_victory",
     title = "Adventure Complete",
-    desc = "The party basks in victory. You may save your progress or start a new run.",
+    desc = "The party basks in victory. You may start a new run from the crossroads.",
     options = {
         Option("Return to Crossroads (start new run)", "crossroads", function() adventureRunning=false end, nil, 100)
     }
@@ -736,9 +646,6 @@ nodes["end_victory"] = {
 -- ----------------------------
 -- Voting system
 -- ----------------------------
--- currentVote structure:
--- { id, title, options = {text...}, counts = {}, votes = {userId = index}, eligible = {userId->true}, endsAt, onComplete }
-
 local function announceVote(vote)
     local list = {}
     for i,opt in ipairs(vote.options) do
@@ -746,7 +653,7 @@ local function announceVote(vote)
     end
     Chat("🗳️ Vote: "..vote.title)
     Chat("Options: "..table.concat(list, " | "))
-    Chat("Vote by chat: "..CONFIG.VOTE_PREFIX.." <letter|number> OR by typing a single letter (A,B,C...) while voting is active. Voting ends in "..round(vote.endsAt - tick()).."s.")
+    Chat("Vote by chat: "..CONFIG.VOTE_PREFIX.." <letter|number> OR by typing a single letter while voting is active. Voting ends in "..round(vote.endsAt - tick()).."s.")
 end
 
 local function startVote(title, optionTexts, duration, eligibleList, onComplete)
@@ -774,13 +681,11 @@ local function startVote(title, optionTexts, duration, eligibleList, onComplete)
     currentVote = v
     announceVote(v)
     updateVoteUI()
-    -- spawn a watcher to complete
     spawn(function()
         while currentVote == v and tick() < v.endsAt do
             wait(0.5)
         end
         if currentVote ~= v then return end
-        -- Tally results and choose winner (random tie-break)
         local highest = -1
         for i=1,#v.options do highest = math.max(highest, v.counts[i] or 0) end
         local top = {}
@@ -798,19 +703,16 @@ end
 local function recordVote(player, raw)
     if not currentVote then return false, "No active vote" end
     if not currentVote.eligible[player.UserId] then return false, "Not eligible to vote" end
-    -- parse raw input: accept prefix "!vote X" or single-letter "A" or a number
     local s = tostring(raw)
-    s = s:gsub("^%s*(.-)%s*$", "%1") -- trim
+    s = s:gsub("^%s*(.-)%s*$", "%1")
     if s:lower():sub(1, #CONFIG.VOTE_PREFIX) == CONFIG.VOTE_PREFIX then
         s = s:sub(#CONFIG.VOTE_PREFIX + 1)
         s = s:gsub("^%s*(.-)%s*$", "%1")
     end
     local idx = nil
-    -- number
     local num = tonumber(s)
     if num and num >= 1 and num <= #currentVote.options then idx = num end
     if not idx then
-        -- letter
         local letter = s:match("^%a$")
         if not letter then letter = s:match("([A-Za-z])") end
         if letter then
@@ -819,19 +721,16 @@ local function recordVote(player, raw)
         end
     end
     if not idx then return false, "Could not parse vote" end
-    -- remove previous vote
     local prev = currentVote.votes[player.UserId]
     if prev then currentVote.counts[prev] = math.max(0, (currentVote.counts[prev] or 1) - 1) end
     currentVote.votes[player.UserId] = idx
     currentVote.counts[idx] = (currentVote.counts[idx] or 0) + 1
     updateVoteUI()
-    -- check if all eligible voted -> early resolution
     local totalEligible = 0
     for id,_ in pairs(currentVote.eligible) do totalEligible = totalEligible + 1 end
     local totalVotes = 0
     for uid,_ in pairs(currentVote.votes) do totalVotes = totalVotes + 1 end
     if totalVotes >= totalEligible then
-        -- compute winner early
         local highest = -1
         for i=1,#currentVote.options do highest = math.max(highest, currentVote.counts[i] or 0) end
         local top = {}
@@ -854,7 +753,6 @@ local function resolveOption(node, optIndex, voteCounts)
         Chat("Choice resolution error: option not found")
         return
     end
-    -- Determine if we got the "good" path based on chanceGood and a random roll
     local roll = math.random(1,100)
     local isGood = roll <= (option.chanceGood or 75)
     if isGood and option.good then
@@ -862,17 +760,14 @@ local function resolveOption(node, optIndex, voteCounts)
     elseif (not isGood) and option.bad then
         pcall(option.bad, {optionIndex=optIndex, voteCounts=voteCounts})
     else
-        -- default effects
         if isGood then
-            -- give small XP and possible item to a random party member
             local uid = partyOrder[math.random(1, math.max(1,#partyOrder))]
             grantXP(uid, CONFIG.BASE_XP_PER_GOOD)
             addItem(uid, randomLootForGoodChoice())
         else
-            damageRandom(roll % 6 + 1)("resolution") -- call function to apply damage
+            damageRandom( (roll % 6) + 1 )("resolution")
         end
     end
-    -- move to next node if defined
     if option.next then
         currentNodeId = option.next
     else
@@ -892,7 +787,6 @@ local function presentNode(nodeId)
     if node.onEnter then pcall(node.onEnter) end
     Chat("📜 "..node.title)
     Chat(node.desc)
-    -- list options and start a vote if not auto-resolve
     local optionsText = {}
     for i,opt in ipairs(node.options) do
         table.insert(optionsText, opt.label)
@@ -903,7 +797,6 @@ local function presentNode(nodeId)
         updateAllUI()
         return
     end
-    -- start vote among party members
     startVote(node.title, optionsText, CONFIG.VOTE_DURATION, partyOrder, function(choiceIndex, counts)
         resolveOption(node, choiceIndex, counts)
     end)
@@ -1052,20 +945,6 @@ local function createGui()
     forceBtn.BackgroundColor3 = Color3.fromRGB(200,120,0)
     gui.ForceBtn = forceBtn
 
-    local saveBtn = Instance.new("TextButton", right)
-    saveBtn.Size = UDim2.new(1, -10, 0, 28)
-    saveBtn.Position = UDim2.new(0,5,0,112)
-    saveBtn.Text = "Save"
-    saveBtn.BackgroundColor3 = Color3.fromRGB(70,70,150)
-    gui.SaveBtn = saveBtn
-
-    local loadBtn = Instance.new("TextButton", right)
-    loadBtn.Size = UDim2.new(1, -10, 0, 28)
-    loadBtn.Position = UDim2.new(0,5,0,146)
-    loadBtn.Text = "Load"
-    loadBtn.BackgroundColor3 = Color3.fromRGB(70,70,150)
-    gui.LoadBtn = loadBtn
-
     local logBox = Instance.new("TextBox", main)
     logBox.Size = UDim2.new(1, -20, 0, 80)
     logBox.Position = UDim2.new(0,10,1,-90)
@@ -1094,7 +973,6 @@ local function createGui()
 
     forceBtn.MouseButton1Click:Connect(function()
         if not currentVote then Chat("No active vote to force.") return end
-        -- try to force the current highest or let GM choose using prompt
         local highest = -1
         local top = {}
         for i=1,#currentVote.options do highest = math.max(highest, currentVote.counts[i] or 0) end
@@ -1104,13 +982,6 @@ local function createGui()
         if currentVote.onComplete then pcall(currentVote.onComplete, chosen, currentVote.counts) end
         currentVote = nil
         updateAllUI()
-    end)
-
-    saveBtn.MouseButton1Click:Connect(function()
-        saveGame()
-    end)
-    loadBtn.MouseButton1Click:Connect(function()
-        loadGame()
     end)
 end
 
@@ -1227,18 +1098,14 @@ local function handleChat(player, message)
     local msg = tostring(message)
     local lower = msg:lower()
 
-    -- Votes
     if currentVote then
         local ok, err = recordVote(player, msg)
         if ok then
             appendLog(player.DisplayName.." voted.")
             return
         end
-        -- not necessarily an error; allow other commands below
     end
 
-    -- Commands:
-    -- !join
     if lower:match("^!join") then
         addPlayerToParty(player)
         updateAllUI()
@@ -1266,7 +1133,6 @@ local function handleChat(player, message)
         updateAllUI()
         return
     end
-    -- vote prefix
     if lower:sub(1, #CONFIG.VOTE_PREFIX) == CONFIG.VOTE_PREFIX then
         local rest = msg:sub(#CONFIG.VOTE_PREFIX + 1)
         local ok, err = recordVote(player, rest)
@@ -1277,7 +1143,6 @@ local function handleChat(player, message)
         end
         return
     end
-    -- quick status
     if lower:match("^!status") then
         local char = party[player.UserId]
         if not char then
@@ -1293,16 +1158,6 @@ local function handleChat(player, message)
         Chat(("🎲 %s rolls %s -> %d"):format(player.DisplayName, notat, r))
         return
     end
-    if lower:match("^!save") and player.UserId == gmUserId then
-        saveGame()
-        return
-    end
-    if lower:match("^!load") and player.UserId == gmUserId then
-        loadGame()
-        return
-    end
-
-    -- If none matched, it's normal chat and may be ignored or logged
 end
 
 -- Hook chat events
@@ -1314,7 +1169,6 @@ if TextChatService and TextChatService.ChatVersion == Enum.ChatVersion.TextChatS
         if player then handleChat(player, txtMessage.Text) end
     end)
 else
-    -- fallback for older chat system
     for _, p in ipairs(Players:GetPlayers()) do
         p.Chatted:Connect(function(msg) handleChat(p, msg) end)
     end
@@ -1341,8 +1195,7 @@ if RunService:IsStudio() then
     end
 end
 
--- Final ready message and instructions
-Chat("📜 The GM script is active. Players: type !join to join the party. When the GM starts the adventure, choices will be presented and you may vote using '"..CONFIG.VOTE_PREFIX.." A' or simply 'A' when voting is active. GM: use the GUI to control, force votes, and save/load.")
+Chat("📜 The GM script is active. Players: type !join to join the party. When the GM starts the adventure, choices will be presented and you may vote using '"..CONFIG.VOTE_PREFIX.." A' or simply 'A' when voting is active. GM: use the GUI to control and force votes.")
 
 -- ----------------------------
 -- End of script
